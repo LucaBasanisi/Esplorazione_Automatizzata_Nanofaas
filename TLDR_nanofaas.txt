@@ -1,0 +1,220 @@
+# Come si carica invece una funzione su Kubernetes?
+
+### Setup Ambiente (Multipass & k3s)
+```bash
+multipass launch --name nanofaas-k8s-dev --cpus 4 --memory 8G --disk 30G
+
+multipass exec nanofaas-k8s-dev -- bash -c "
+  sudo apt-get update &&
+  sudo apt-get install -y docker.io openjdk-21-jdk-headless &&
+  sudo docker run -d --name registry -p 5000:5000 registry:2 --restart always
+"
+
+multipass exec nanofaas-k8s-dev -- bash -c "curl -sfL https://get.k3s.io | sudo sh -s - --disable traefik"
+
+# Configura k3s per accettare che localhost:5000 è un registro HTTP (insicuro) e non HTTPS.
+# Senza questo, Kubernetes non riuscirà mai a scaricare le tue immagini.
+multipass exec nanofaas-k8s-dev -- bash -c '
+	sudo tee /etc/rancher/k3s/registries.yaml <<-EOF
+	mirrors:
+	"localhost:5000":
+	        endpoint:
+	          - "http://localhost:5000"
+	EOF
+	sudo systemctl restart k3s
+'
+```
+
+
+```bash
+# Verifichiamo che sia tutto OK
+multipass exec nanofaas-k8s-dev -- cat /etc/rancher/k3s/registries.yaml
+# Questo comando deve restituire che localhost è 5000
+
+multipass exec nanofaas-k8s-dev -- bash -c "sudo kubectl get nodes && sudo docker ps"
+```
+Se lo STATUS è `Ready` possiamo proseguire.
+
+
+### Sincronizzazione e Build Core
+
+Collegare direttamente la cartella del PC alla VM. Ogni modifica salvata sul PC sarà istantaneamente visibile nella VM.
+```bash
+multipass mount /home/luca/Documents/nanofaas nanofaas-k8s-dev:/home/ubuntu/nanofaas
+```
+
+```bash
+# Build gradle
+multipass exec nanofaas-k8s-dev -- bash -c 'cd ~/nanofaas && ./gradlew :control-plane:bootJar :function-runtime:bootJar'
+
+# Docker build
+# L'immagine deve essere buildata dentro la VM per accedere al contesto dei sorgenti (SDK) e pushata nel registry locale.
+multipass exec nanofaas-k8s-dev -- bash -c 'cd ~/nanofaas && sudo docker build -t localhost:5000/nanofaas/control-plane:latest -f control-plane/Dockerfile control-plane/'
+
+# Push nel registry della VM
+multipass exec nanofaas-k8s-dev -- sudo docker push localhost:5000/nanofaas/control-plane:latest
+```
+
+> **Consiglio**: Se il push fallisce, verifica che il container del registro sia attivo con `sudo docker start registry`.
+
+### Deploy nanoFaaS
+```bash
+multipass exec nanofaas-k8s-dev -- sudo kubectl apply -f k8s/
+multipass exec nanofaas-k8s-dev -- bash -c "sed 's|image: .*|image: localhost:5000/nanofaas/control-plane:latest|' ~/nanofaas/k8s/control-plane-deployment.yaml | sudo kubectl apply -f -"
+```
+
+
+Controlliamo ci sia tutto:
+```bash
+multipass exec nanofaas-k8s-dev -- sudo kubectl get svc -A
+```
+Dovrebbe sicuramente esserci:
+- kubernetes
+- kube-dns
+- metric-server
+- control plane
+> Assicurarsi che ci sia il control-plane, se è fermo → 0/1 READY indica che Kubernetes non è riuscito a creare il Pod.
+
+`multipass exec nanofaas-k8s-dev -- sudo kubectl get events -n nanofaas --sort-by='.lastTimestamp'` → Se dice qualcosa come: *error looking up service account nanofaas/nanofaas-control-plane: serviceaccount "nanofaas-control-plane" not found* provare ad eseguire questo comando → `multipass exec nanofaas-k8s-dev -- sudo kubectl rollout restart deployment nanofaas-control-plane -n nanofaas`
+
+### Setup della CLI
+`nanofaas-cli` è scritto in Java e deve essere compilato prima del primo utilizzo.
+```bash
+multipass exec nanofaas-k8s-dev -- bash -c 'cd ~/nanofaas && ./gradlew :nanofaas-cli:installDist'
+```
+Creazione wrapper globale dinamico. Questo script recupera l'IP del control-plane e configura l'eseguibile 'nanofaas'
+```bash
+multipass exec nanofaas-k8s-dev -- bash -c '
+  IP=$(sudo kubectl get svc -n nanofaas control-plane -o jsonpath="{.spec.clusterIP}")
+  cat <<EOF > nanofaas_wrapper.sh
+#!/bin/bash
+/home/ubuntu/nanofaas/nanofaas-cli/build/install/nanofaas-cli/bin/nanofaas-cli --endpoint http://$IP:8080 "\$@"
+EOF
+  sudo mv nanofaas_wrapper.sh /usr/local/bin/nanofaas
+  sudo chmod +x /usr/local/bin/nanofaas
+  echo "CLI configurata con successo! Endpoint: http://$IP:8080"
+'
+```
+
+- `"\$@"`: Qui il backslash serve perché vogliamo che $@ venga scritto letteralmente nel file (sarà risolto quando userai il comando nanofaas).
+- `cat <<EOF`: È il modo più pulito per scrivere file multi-riga senza i caratteri di escape.
+
+> Verifichiamo che funzioni tutto
+```bash
+multipass exec nanofaas-k8s-dev -- nanofaas fn --help
+```
+
+
+
+### Duplicazione VM Multipass
+Così non serve costantemente reinstallarla.
+- salvo lo snapshot
+- reimposto la VM ogni volta che voglio fare delle modifiche
+```bash
+# Crea uno snapshot (VM può essere running o stopped)
+multipass stop nanofaas-k8s-dev
+multipass snapshot nanofaas-k8s-dev --name snap-base
+multipass start nanofaas-k8s-dev
+```
+Se poi volessi ripristinare lo snapshot
+```bash
+# Ripristina
+multipass stop nanofaas-k8s-dev
+multipass restore nanofaas-k8s-dev.snap-base
+multipass start nanofaas-k8s-dev
+
+multipass exec nanofaas-k8s-dev -- sudo docker start registry
+```
+
+
+### Sviluppo Funzione
+
+```bash
+./scripts/fn-init.sh hello-java --lang java --yes
+# cambiare java con python o go in base alle necessità...
+
+
+./gradlew :functions:java:hello-java:build
+```
+
+### Differenze tra i linguaggi (Java, Go e Python)
+La differenza sta tutta nel "come si arriva all'immagine" della funzione.
+
+**PYTHON**
+- Sul PC → nessuna compilazione
+- Nella VM → basta accedere alla cartella della funzione
+```bash
+multipass exec nanofaas-k8s-dev -- sudo docker build -t localhost:5000/nanofaas/hello-python:latest .
+
+# Se non funziona provare questo:
+# multipass exec nanofaas-k8s-dev -- bash -c 'cd ~/nanofaas/functions/python/hello-python && sudo docker build -t localhost:5000/nanofaas/hello-python:latest .'
+
+```
+
+**JAVA**
+- Sul PC → bisogna prima compilare con `./gradlew build` (serve il JAR compilato)
+- Nella VM → bisogna entrare dentro la *root* del progetto
+```bash
+./gradlew :functions:java:hello-java:build
+
+multipass exec nanofaas-k8s-dev -- bash -c 'cd ~/nanofaas && sudo docker build -t localhost:5000/nanofaas/hello-java:latest -f functions/java/hello-java/Dockerfile functions/java/hello-java/'
+
+# OPPURE
+# multipass exec nanofaas-k8s-dev -- bash -c 'cd ~/nanofaas && sudo docker build -t localhost:5000/nanofaas/mia-funzione:latest -f functions/go/mia-funzione/Dockerfile .'
+```
+Docker vede come "punto di partenza" la cartella della funzione dove Gradle ha messo il JAR. È il modo più pulito per non tirarsi dietro tutta la root del progetto se non serve.
+
+**GO**
+- Sul PC → bisogna prima compilare con `go build`
+- Nella VM →  bisogna stare nella *root* del progetto
+```bash
+# Comando un pò sus questo, va visto che cosa fa di preciso
+cd functions/go/NOME_FUNZIONE && go mod tidy && GOOS=linux GOARCH=amd64 go build -o main && cd -
+
+multipass exec nanofaas-k8s-dev -- bash -c 'cd ~/nanofaas/functions/go/hello-go && sudo docker build -t localhost:5000/nanofaas/hello-go:latest .'
+```
+### Push della funzione (uguale per tutti i linguaggi)
+```bash
+multipass exec nanofaas-k8s-dev -- sudo docker push localhost:5000/nanofaas/NOME_FUNZIONE:latest
+```
+
+Modifica **function.yaml** impostando:
+```yaml
+image: localhost:5000/nanofaas/NOME_FUNZIONE:latest
+```
+### Scrittura Funzione
+Boh banalmente devi scrivere la funzione
+SULLA TUA MACCHINA PERÒ, NON su multipass
+
+### Registrazione
+```bash
+multipass exec nanofaas-k8s-dev -- bash -c "cd ~/nanofaas && nanofaas fn apply -f functions/LINGUAGGIO/NOME_FUNZIONE/function.yaml"
+```
+
+> **Consiglio:** Se il comando `nanofaas` non viene trovato, assicurati di aver configurato l'alias
+
+### Invocazione Funzione
+La CLI gestisce automaticamente l'endpoint e il formato della richiesta.
+```bash
+multipass exec nanofaas-k8s-dev -- bash -c "nanofaas invoke hello-java -d '{\"input\": {}}'"
+
+# OPPURE
+# multipass exec nanofaas-k8s-dev -- nanofaas invoke hello-java -d '{"input": "test"}'
+
+```
+
+### Modifiche al codice
+Ogni volta che si cambia il codice l'immagine Docker cambia tag.
+Ma dato che usiamo `mount`, basta salvare il file sul PC e poi forzare il refresh dell'immagine nella VM.
+```bash
+# 1. Salva il file sul PC
+# 2. Riesegui Build e Push (punto 2 e 3)
+# 3. Svuota la cache di k3s e riavvia java
+multipass exec nanofaas-k8s-dev -- sudo k3s crictl rmi localhost:5000/nanofaas/mia-funzione:latest
+
+# 4. Riavvia il Pod
+multipass exec nanofaas-k8s-dev -- sudo kubectl rollout restart deployment fn-mia-funzione -n nanofaas
+```
+
+> **Consiglio:** Il refresh dell'immagine (`ctr image rm`) è l'unico modo per forzare Kubernetes a scaricare il nuovo codice se il tag rimane `latest`.
+

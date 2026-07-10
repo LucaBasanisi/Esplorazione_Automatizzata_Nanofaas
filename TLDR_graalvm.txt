@@ -1,0 +1,41 @@
+# TLDR: GraalVM in nanoFaaS
+
+In nanoFaaS, GraalVM è il motore che abilita performance "bare-metal" trasformando applicazioni Java/Spring Boot in binari nativi (AOT). Questo permette **Cold Start < 100ms**, un consumo di **RAM ridotto** (fino a 5x) e l'uso di container **Distroless** ultra-leggeri.
+
+## 1. Setup dell'Ambiente
+Per compilare in nativo, è necessario utilizzare una distribuzione JDK che includa il tool `native-image`.
+- **Installazione**: Usa SDKMAN per gestire le versioni GraalVM:
+  ```bash
+  sdk install java 21.0.2-graalce # o versione superiore
+  sdk use java 21.0.2-graalce
+  ```
+- **Variabili Critiche**: Assicurati che il toolchain sia visibile a Gradle impostando le variabili d'ambiente:
+  ```bash
+  export JAVA_HOME="$HOME/.sdkman/candidates/java/current"
+  export GRAALVM_HOME="$JAVA_HOME"
+  ```
+
+## 2. Sviluppo Native-Ready (Best Practices)
+La compilazione nativa si basa sull'analisi statica del codice. Per evitare problemi con la Reflection e il caricamento dinamico delle classi:
+- **Preferisci Jackson a Gson**: Spring Boot AOT genera automaticamente gli hint necessari per Jackson. Con Gson o librerie simili, dovresti registrare manualmente i `RuntimeHints`.
+- **Usa le API Standard**: Per le chiamate HTTP, preferisci `java.net.http.HttpClient` (Java 11+). È nativo, efficiente e non richiede configurazioni extra per GraalVM.
+- **Evita la Reflection manuale**: Se necessaria, deve essere dichiarata esplicitamente tramite file di configurazione JSON o hint programmatici di Spring.
+
+## 3. Configurazione della Build
+Il progetto nanoFaaS centralizza la gestione dei plugin per evitare conflitti di classpath.
+- **Gestione Plugin**: Non specificare la versione del plugin `org.graalvm.buildtools.native` nei sottomoduli (es. nelle funzioni). La versione è gestita globalmente nel `build.gradle` della root.
+- **Risorse Hardware**: La compilazione AOT è intensiva (CPU/RAM) e dura alcuni minuti. Se la build viene interrotta dal sistema (OOM Killer), limita la RAM dedicata al processo:
+  ```bash
+  ./gradlew nativeCompile -PnativeImageArgs="-J-Xmx4g"
+  ```
+
+## 4. Comandi Operativi e Binari
+### Compilazione
+- **Control Plane**: `./scripts/controlplane.sh native --profile all`
+- **Funzioni Java**: `./gradlew :functions:java:<nome>:nativeCompile`
+- **Full Stack**: `./scripts/native-build.sh` (esegue build e smoke test di tutto l'ecosistema).
+
+### Localizzazione Binari
+Al termine della compilazione, i file eseguibili si trovano in:
+- `control-plane/build/native/nativeCompile/control-plane`
+- `functions/java/<nome>/build/native/nativeCompile/<nome>`

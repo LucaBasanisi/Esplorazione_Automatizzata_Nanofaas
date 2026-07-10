@@ -1,0 +1,50 @@
+### 1. Inizializzazione (PC Host)
+# Esegui dalla root del progetto sul tuo PC
+./scripts/fn-init.sh mia-funzione --lang go --yes
+# Oppure: --lang java / --lang python
+
+### 2. Build Locale (PC Host)
+# Necessario per preparare i file prima del build Docker
+
+# GO: Risoluzione dipendenze (fondamentale!) e compilazione
+cd examples/go/mia-funzione && go mod tidy && GOOS=linux GOARCH=amd64 go build -o main && cd -
+
+# JAVA: Compilazione JAR
+./gradlew :examples:java:mia-funzione:build
+
+# PYTHON: Nulla
+
+### 3. Docker Build (VM Multipass)
+# REGOLA D'ORO: Per Go e Java, buildare SEMPRE dalla ROOT del progetto
+# per permettere a Docker di "vedere" gli SDK locali.
+
+# GO e JAVA (Esempio Go):
+multipass exec nanofaas-k8s-dev -- bash -c 'cd ~/nanofaas && sudo docker build -t localhost:5000/nanofaas/mia-funzione:latest -f examples/go/mia-funzione/Dockerfile .'
+
+# PYTHON (Contesto locale è sufficiente):
+multipass exec nanofaas-k8s-dev -- bash -c 'cd ~/nanofaas/examples/python/mia-funzione && sudo docker build -t localhost:5000/nanofaas/mia-funzione:latest .'
+
+### 4. Push e Registrazione (VM Multipass)
+# Push dell'immagine nel registro locale
+multipass exec nanofaas-k8s-dev -- sudo docker push localhost:5000/nanofaas/mia-funzione:latest
+
+# Registrazione (Percorso assoluto /home/ubuntu/... è più sicuro per la CLI)
+multipass exec nanofaas-k8s-dev -- nanofaas fn apply -f /home/ubuntu/nanofaas/examples/go/mia-funzione/function.yaml
+
+### 5. Invocazione
+multipass exec nanofaas-k8s-dev -- nanofaas invoke mia-funzione -d '{"key": "valore"}'
+
+### 🚀 Workflow Aggiornamento Rapido (Hot Refresh)
+Se modifichi il codice sul PC e vuoi vedere subito i cambiamenti senza cambiare versione/tag:
+
+1. **Build & Push:** (Riesegui i punti 2 e 3 del setup).
+2. **Svuota Cache Nodo:** Forza k3s a dimenticare l'immagine vecchia:
+   multipass exec nanofaas-k8s-dev -- sudo k3s crictl rmi localhost:5000/nanofaas/mia-funzione:latest
+3. **Restart Pod:**
+   multipass exec nanofaas-k8s-dev -- sudo kubectl rollout restart deployment fn-mia-funzione -n nanofaas
+
+### ⚠️ Note Importanti:
+...
+1. RBAC: Se ricevi un errore 500, verifica che il file k8s/rbac.yaml includa i permessi "create" per i "pods".
+2. IMAGE POLICY: Se aggiorni il codice ma non vedi cambiamenti nell'invocazione, cancella e ri-crea la funzione:
+   nanofaas fn delete mia-funzione && nanofaas fn apply -f ...

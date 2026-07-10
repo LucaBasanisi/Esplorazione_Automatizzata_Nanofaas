@@ -1,0 +1,71 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-script
+  namespace: nanofaas
+data:
+  init.sql: |
+    -- Questo script crea la tabella e inserisce dati di test
+    CREATE TABLE IF NOT EXISTS mia_tabella (
+        id SERIAL PRIMARY KEY,
+        nome TEXT,
+        valore INTEGER
+    );
+    -- Generiamo 100.000 righe di test velocemente
+    INSERT INTO mia_tabella (nome, valore)
+    SELECT 'Utente ' || i, i * 2
+    FROM generate_series(1, 100000) s(i);
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service # <--- Questo sarà il tuo DB_HOST
+  namespace: nanofaas
+spec:
+  selector:
+    app: postgres-test
+  ports:
+    - protocol: TCP
+      port: 5432
+      targetPort: 5432
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-test
+  namespace: nanofaas
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-test
+  template:
+    metadata:
+      labels:
+        app: postgres-test
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15
+          env:
+            - name: POSTGRES_DB
+              value: "mio_db"
+            - name: POSTGRES_USER
+              value: "postgres"
+            - name: POSTGRES_PASSWORD
+              value: "password123"
+          ports:
+            - containerPort: 5432
+          volumeMounts:
+            - name: sql-init-volume
+              mountPath: /docker-entrypoint-initdb.d/ # Percorso magico per l'init
+            - name: pgdata-volume
+              mountPath: /var/lib/postgresql/data # Dove Postgres salva i dati
+      volumes:
+        - name: sql-init-volume
+          configMap:
+            name: postgres-init-script # Legge lo script dalla ConfigMap
+        - name: pgdata-volume
+          emptyDir: {} # <--- Qui sta il trucco: i dati sono in RAM/Disco locale, spariscono al restart

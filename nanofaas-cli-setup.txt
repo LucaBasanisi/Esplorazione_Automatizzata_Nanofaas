@@ -1,0 +1,32 @@
+### Setup della CLI (nanofaas-cli)
+# 1. Compilazione
+multipass exec nanofaas-k8s-dev -- bash -c 'cd ~/nanofaas && ./gradlew :nanofaas-cli:installDist'
+
+# 2. Creazione wrapper globale dinamico
+# Questo script recupera l'IP del control-plane e configura l'eseguibile 'nanofaas'
+multipass exec nanofaas-k8s-dev -- bash -c '
+  IP=$(sudo kubectl get svc -n nanofaas control-plane -o jsonpath="{.spec.clusterIP}")
+  cat <<EOF > nanofaas_wrapper.sh
+#!/bin/bash
+/home/ubuntu/nanofaas/nanofaas-cli/build/install/nanofaas-cli/bin/nanofaas-cli --endpoint http://$IP:8080 "\$@"
+EOF
+  sudo mv nanofaas_wrapper.sh /usr/local/bin/nanofaas
+  sudo chmod +x /usr/local/bin/nanofaas
+  echo "CLI configurata con successo! Endpoint: http://$IP:8080"
+'
+
+# 3. Verifica funzionamento
+multipass exec nanofaas-k8s-dev -- nanofaas fn list
+
+### Manutenzione Ambiente (Snapshot)
+# Utile per non dover reinstallare tutto ogni volta
+# Snapshot (con VM spenta è più sicuro)
+multipass stop nanofaas-k8s-dev
+multipass snapshot nanofaas-k8s-dev --name snap-base
+multipass start nanofaas-k8s-dev
+
+# Ripristino (torna allo stato base con k3s e registry puliti)
+multipass stop nanofaas-k8s-dev
+multipass restore nanofaas-k8s-dev.snap-base
+multipass start nanofaas-k8s-dev
+

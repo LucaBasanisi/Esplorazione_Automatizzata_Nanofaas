@@ -87,7 +87,7 @@ log "Verifica stato reale dell'esecuzione..."
 log "======================================================"
 EXEC_ID=$(echo "$RESP_1" | grep -o '"executionId":"[^"]*"' | cut -d'"' -f4)
 if [ -n "$EXEC_ID" ]; then
-    STATUS_RESP=$(run_vm "curl -s http://$CP_IP:8080/v1/internal/executions/$EXEC_ID")
+    STATUS_RESP=$(run_vm "curl -s http://$CP_IP:8080/v1/executions/$EXEC_ID")
     echo -e "\n${GREEN}>>> Stato reale dal Gateway:${NC} $STATUS_RESP\n"
 else
     warn "Impossibile estrarre l'executionId dalla prima risposta."

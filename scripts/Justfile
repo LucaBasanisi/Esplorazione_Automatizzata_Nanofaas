@@ -127,3 +127,10 @@ test-queue-full:
     @echo -e "{{YELLOW}}>>> STEP: Queue Full (Backpressure) Test{{NC}}"
     @echo -e "{{BLUE}}======================================================{{NC}}"
     ./tests/e2e-queue-full.sh
+
+# Test invocazione asincrona e idempotenza (il bug del 'queued')
+test-async-idempotency:
+    @echo -e "{{BLUE}}======================================================{{NC}}"
+    @echo -e "{{YELLOW}}>>> STEP: Async Idempotency Bug E2E Test{{NC}}"
+    @echo -e "{{BLUE}}======================================================{{NC}}"
+    ./tests/e2e-async-idempotency.sh

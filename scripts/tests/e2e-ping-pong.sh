@@ -41,7 +41,7 @@ def handle(req):
     
     if count > 0:
         # Piccolo delay per rendere i log leggibili e non saturare la coda istantaneamente
-        time.sleep(0.5)
+        time.sleep(2)
         url = "http://$CP_IP:8080/v1/functions/$PONG_NAME:enqueue"
         try:
             # Dobbiamo avvolgere in 'input' perche stiamo chiamando le API del Gateway direttamente
@@ -102,7 +102,7 @@ def handle(req):
     print(f"--- PONG ACTIVE: count={count}, exec_id={exec_id} ---", flush=True)
     
     if count > 0:
-        time.sleep(0.5)
+        time.sleep(2)
         url = "http://$CP_IP:8080/v1/functions/$PING_NAME:enqueue"
         try:
             next_request = {"input": {"count": count - 1}}
@@ -153,10 +153,10 @@ run_vm "nanofaas enqueue $PING_NAME -d '{\"count\": 10}'"
 log "Monitoraggio del Ping-Pong per 30 secondi..."
 for i in {1..15}; do
     echo -e "\n${CYAN}--- $PING_NAME Logs ---${NC}"
-    run_vm "sudo kubectl logs -n nanofaas -l function=$PING_NAME --tail=20 | grep 'PING ACTIVE' || true"
+    run_vm "sudo kubectl logs -n nanofaas -l function=$PING_NAME --tail=20 | grep 'PING ACTIVE' | tail -n 1 || true"
     
     echo -e "\n${GREEN}--- $PONG_NAME Logs ---${NC}"
-    run_vm "sudo kubectl logs -n nanofaas -l function=$PONG_NAME --tail=20 | grep 'PONG ACTIVE' || true"
+    run_vm "sudo kubectl logs -n nanofaas -l function=$PONG_NAME --tail=20 | grep 'PONG ACTIVE' | tail -n 1 || true"
     
     sleep 2
 done
